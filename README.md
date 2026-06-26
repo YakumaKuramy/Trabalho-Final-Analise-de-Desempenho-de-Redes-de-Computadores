@@ -4,18 +4,18 @@ Este repositório contém o ambiente automatizado, os scripts de coleta, os meca
 
 O experimento consiste em 360 testes automatizados divididos em 30 réplicas estatísticas para cada cenário de perda planejado (0%, 1%, 3%, 5%, 10% e 20%). A arquitetura utiliza uma topologia cliente-servidor distribuída entre o ambiente local (WSL2) e a nuvem (AWS).
 
-## 1. Dimensionamento de Tempo e Restrições da AWS
+## 1. Dimensionamento de Tempo e Mitigação de Riscos na AWS
 
-O tempo total estimado para a execução de toda a bateria de testes automatizados é de aproximadamente 180 minutos (3 horas), considerando que cada uma das 360 réplicas possui uma janela de transmissão ativa de 30 segundos, somada aos intervalos de execução, limpeza de buffers e reconfiguração das tabelas de roteamento do kernel.
+O tempo bruto para a execução de toda a bateria de testes automatizados é de aproximadamente 180 minutos (3 horas). No entanto, o AWS Learner Lab impõe um limite estrito de **4 horas** por sessão ativa, encerrando todas as instâncias EC2 compulsoriamente após esse período.
 
-A infraestrutura de laboratório utilizada na AWS (Learner Lab) possui uma restrição severa de tempo: cada sessão ativa de laboratório expira automaticamente após 180 minutos (3 horas). Como o tempo de execução do script consome o limite exato da sessão, qualquer oscilação ou atraso na rede resultará no encerramento da instância antes da conclusão da coleta.
+Se o operador utilizar a mesma sessão para criar instâncias, configurar grupos de segurança, depurar chaves SSH e validar a conectividade, o tempo restante será insuficiente para garantir a execução contínua das 360 réplicas, resultando na perda total dos logs em andamento.
 
-### Estratégia de Divisão do Experimento
+### Estratégia de Mitigação: Divisão em Duas Sessões
 
-Para garantir a integridade dos dados e mitigar o risco de timeout da sessão da AWS, a execução deve ser obrigatoriamente segmentada em duas sessões distintas do laboratório:
+Para neutralizar o risco de timeout, o experimento deve ser planejado estritamente em duas sessões consecutivas do laboratório:
 
-- **Sessão 1 da AWS (Primeira Metade):** Execução exclusiva dos cenários de perda de 0%, 1% e 3%. Ao final desta sessão, os logs gerados devem ser salvos e compactados.
-- **Sessão 2 da AWS (Segunda Metade):** Inicialização de uma nova sessão de laboratório, reinicialização das instâncias e execução dos cenários restantes de 5%, 10% e 20%.
+- **Sessão 1: Preparação e Homologação:** Destinada à configuração de infraestrutura, liberação de portas de firewall (Security Groups), testes manuais de conectividade com o iperf3, instalação de pacotes no WSL2 e validação dos scripts. Esta sessão pode expirar ou ser encerrada propositalmente após os testes iniciais.
+- **Sessão 2: Execução Dedicada (Produção):** Inicialização de uma nova sessão limpa com o cronômetro zerado em 4 horas. O operador conecta-se diretamente à instância utilizando o aprendizado da sessão anterior e dispara o script imediatamente, garantindo uma margem de segurança de 1 hora.
 
 ---
 
@@ -38,6 +38,22 @@ Os dados estatísticos processados a partir das 30 réplicas por cenário encont
 | TCP       | 20%           | 0.20                    | 0.02             | 0.17                 | 0.02             |
 | UDP       | 20%           | 66.66                   | 47.94            | 79.39                | 0.58             |
 
+### Análise Visual dos Dados
+
+Abaixo estão os gráficos consolidados que demonstram o comportamento dinâmico das pilhas de protocolos sob estresse:
+
+#### Imagem A: Vazão Bruta Injetada na Rede (Throughput)
+
+Demonstra o volume de tráfego injetado na interface de rede pelo transmissor. Evidencia a agressividade do UDP em manter a saturação do canal próximo ao teto nominal configurado (100 Mbps) em contraste com o recuo imediato do algoritmo CUBIC do TCP.
+
+#### Imagem B: O Impacto Real na Aplicação (Goodput / Vazão Útil)
+
+Ilustra o volume de dados efetivamente entregue à camada de aplicação no destino. Revela o "efeito penhasco" sofrido pelo TCP Cubic, cuja vazão útil entra em colapso prático (menos de 3 Mbps) a partir de 1% de perda de pacotes.
+
+#### Imagem C: Validação da Perda Planejada vs Efetiva
+
+Gráfico de controle metodológico que compara as taxas de descarte injetadas artificialmente via kernel com o percentual de perda real contabilizado estatisticamente pelo receptor na AWS.
+
 ---
 
 ## 3. Arquitetura e Pré-requisitos de Software
@@ -59,16 +75,18 @@ O ambiente operacional exige duas máquinas baseadas em Linux com conectividade 
 
 ## 4. Guia de Execução Passo a Passo
 
-### Etapa 4.1: Preparação do Servidor na AWS
+### Etapa 4.1: Sessão 1 - Homologação de Infraestrutura e Redes
 
-Após instanciar a máquina virtual na console AWS EC2, acesse o terminal do servidor via SSH através do terminal local:
+Acesse o console da AWS, inicie o laboratório do Learner Lab e crie uma instância EC2 executando o Ubuntu Server. No painel de gerência da EC2, localize o Security Group vinculado à instância e adicione uma regra de entrada permitindo conexões na porta TCP 5201 e UDP 5201 originadas do IP público da sua rede local.
+
+Abra o terminal do seu ambiente local (WSL2) e conecte-se à instância EC2 via SSH utilizando a sua chave privada `.pem`:
 
 ```bash
 ssh -i "sua-chave.pem" ubuntu@seu-ip-publico-aws
 
 ```
 
-Atualize os repositórios da instância e instale o utilitário de medição:
+Uma vez autenticado no servidor da AWS, atualize a lista de repositórios do sistema operacional e instale o software de medição de performance:
 
 ```bash
 sudo apt-get update
@@ -76,16 +94,45 @@ sudo apt-get install -y iperf3
 
 ```
 
-Inicie o servidor `iperf3` em um loop infinito estruturado. Esse comando garante que, mesmo após o término de uma sessão de testes de 30 segundos, o receptor permaneça escutando na porta padrão (5201) sem encerrar o processo:
+Inicie o receptor do iperf3 em modo padrão para testar a conectividade básica:
+
+```bash
+iperf3 -s
+
+```
+
+Abra uma segunda aba no terminal do seu WSL2 local (mantendo a conexão SSH aberta na primeira) e dispare um teste rápido de 5 segundos para testar a liberação das portas e do Security Group:
+
+```bash
+# Teste de conectividade TCP
+iperf3 -c seu-ip-publico-aws -t 5
+
+# Teste de conectividade UDP
+iperf3 -c seu-ip-publico-aws -u -b 10M -t 5
+
+```
+
+Se ambos os testes exibirem relatórios de vazão na tela, a infraestrutura está homologada. Feche a sessão do laboratório AWS para zerar o cronômetro de 4 horas.
+
+### Etapa 4.2: Sessão 2 - Instalação de Dependências e Preparação do Experimento
+
+Inicie uma nova sessão do AWS Learner Lab para obter uma janela limpa de 4 horas. Ligue a instância EC2 e capture o novo endereço IP público associado a ela.
+
+Acesse o servidor via SSH através do terminal local:
+
+```bash
+ssh -i "sua-chave.pem" ubuntu@novo-ip-publico-aws
+
+```
+
+Execute o comando em loop infinito para garantir que o processo do iperf3 reinicie automaticamente após cada réplica terminada, permanecendo pronto para receber conexões sem intervenção manual:
 
 ```bash
 while true; do iperf3 -s -1; done
 
 ```
 
-### Etapa 4.2: Configuração e Instalação de Dependências no Cliente (WSL2)
-
-Abra o terminal do WSL2 no seu ambiente local. Instale todas as dependências do sistema operacional e as bibliotecas estatísticas do R necessárias para o parse de dados:
+Retorne ao terminal local do WSL2 para instalar os pacotes essenciais do sistema e o ambiente R utilizado para as análises matemáticas:
 
 ```bash
 sudo apt-get update
@@ -93,14 +140,14 @@ sudo apt-get install -y iperf3 iproute2 r-base
 
 ```
 
-Instale a dependência de leitura de JSON para o ambiente R via linha de comando:
+Instale a biblioteca de manipulação de arquivos JSON dentro do ambiente estatístico R:
 
 ```bash
 sudo Rscript -e "install.packages('jsonlite', repos='http://cran.us.r-project.org')"
 
 ```
 
-Crie o diretório do projeto e configure a estrutura de arquivos:
+Crie o diretório de trabalho estruturado e mude para a pasta recém-criada:
 
 ```bash
 mkdir -p ~/experimento_redes/resultados_iperf_json
@@ -108,7 +155,7 @@ cd ~/experimento_redes
 
 ```
 
-Crie os arquivos de automação e processamento utilizando o editor de texto de sua preferência (como o `nano`):
+Crie os arquivos vazios que receberão os scripts de automação, processamento e renderização de imagens:
 
 ```bash
 nano executar_testes.sh
@@ -117,76 +164,54 @@ nano gerar_graphics_banca.R
 
 ```
 
-_Cole os respectivos códigos desenvolvidos para cada script em seus arquivos correspondentes, salve e feche os arquivos._
+_Abra cada arquivo individualmente utilizando o editor de texto, insira os respectivos códigos validados, salve e feche os arquivos._
 
-Conceda permissão de execução estrita para o script em Bash:
+Atribua permissões estritas de execução para o script de controle em Bash:
 
 ```bash
 chmod +x executar_testes.sh
 
 ```
 
-### Etapa 4.3: Execução Estratégica da Bateria de Testes (Divisão por Sessões)
+### Etapa 4.3: Execução da Automação de Coleta
 
-#### Execução da Sessão 1 (Cenários: 0%, 1%, 3%)
+Abra o arquivo `executar_testes.sh` e atualize a variável que aponta para a infraestrutura de nuvem com o novo IP público capturado no início da Sessão 2.
 
-Edite o arquivo `executar_testes.sh` para garantir que a matriz de laço de repetição contenha apenas os valores `0 1 3` na linha de definição das taxas de perda. Configure também a variável do IP de destino com o IP público atual da sua instância AWS.
-
-Execute a primeira metade do experimento:
+Inicie o processo de coleta automatizada:
 
 ```bash
 ./executar_testes.sh
 
 ```
 
-Aguarde a conclusão da primeira bateria (aproximadamente 1 hora e 30 minutos). Após o término, compacte os resultados gerados para evitar perdas caso a instância sofra timeout:
-
-```bash
-tar -czvf logs_metade_1.tar.gz resultados_iperf_json/
-
-```
-
-#### Execução da Sessão 2 (Cenários: 5%, 10%, 20%)
-
-Se a sessão do laboratório AWS expirar, inicie uma nova sessão, ligue a instância EC2 e capture o novo IP público gerado. No terminal do servidor AWS, reinicie o loop receptor do `iperf3`.
-
-No terminal do cliente local (WSL2), edite o arquivo `executar_testes.sh` modificando a linha de perdas para contemplar apenas os valores `5 10 20` e atualize o IP público se este tiver mudado.
-
-Execute a segunda metade do experimento:
-
-```bash
-./executar_testes.sh
-
-```
-
-Aguarde a conclusão (mais 1 hora e 30 minutos).
+_O terminal exibirá o avanço individual de cada uma das 360 réplicas. Não interrompa o processo nem permita que a máquina hospedeira entre em modo de suspensão ou hibernação durante as 3 horas de execução._
 
 ### Etapa 4.4: Consolidação dos Dados e Análise Estatística
 
-Com os logs das duas sessões armazenados na pasta `resultados_iperf_json`, execute o script de processamento de dados em R. Este script fará a varredura individual de cada um dos 360 arquivos JSON extraindo as chaves de desempenho bruto e útil:
+Após a conclusão das 360 réplicas (sinalizadas pela mensagem final do script em Bash), execute o processamento lógico em R. O script irá varrer a pasta de logs brutos, extrair as chaves JSON necessárias e compilar as médias e desvios padrão:
 
 ```bash
 Rscript processar_resultados_v2.R
 
 ```
 
-Para validar se os dados foram compilados corretamente e se a tabela final não possui inconsistências, execute a leitura estruturada do arquivo CSV gerado diretamente no terminal:
+Valide a integridade do arquivo de dados consolidado imprimindo a estrutura da tabela final diretamente na tela do terminal:
 
 ```bash
 Rscript -e "df <- read.csv('resumo_estatistico_final.csv'); print(df, row.names = FALSE)"
 
 ```
 
-### Etapa 4.5: Geração de Matrizes Visuais para a Banca
+### Etapa 4.5: Renderização dos Gráficos para o Repositório
 
-Execute o script gráfico para gerar os três arquivos independentes de imagem que compõem a análise comparativa estruturada do comportamento das pilhas de protocolo:
+Execute o script visual em R para processar a matriz de dados e gerar as imagens comparativas no formato `.png`:
 
 ```bash
 Rscript gerar_graphics_banca.R
 
 ```
 
-Para listar os arquivos gerados em formato de imagem de alta definição na pasta do projeto, utilize o comando:
+Para confirmar que os arquivos de imagem foram gravados no diretório com as dimensões corretas, execute a listagem do diretório filtrando pela extensão:
 
 ```bash
 ls -l *.png
@@ -197,7 +222,7 @@ ls -l *.png
 
 ## 5. Estrutura de Diretórios Completa
 
-A árvore estrutural do projeto após a execução de todas as etapas deve se apresentar da seguinte forma:
+A árvore estrutural do projeto após a conclusão de todas as fases descritas neste guia deve se apresentar exatamente da seguinte forma:
 
 ```text
 ├── resultados_iperf_json/       # Diretório contendo os 360 arquivos .json brutos coletados
