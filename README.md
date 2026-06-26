@@ -210,5 +210,3 @@ A árvore estrutural do projeto após a execução de todas as etapas deve se ap
 └── imagem_C_loss_validation.png # Gráfico de barras: Validação de Perda Planejada vs Efetiva
 
 ```
-
----
