@@ -7,7 +7,7 @@ reps <- 30
 
 dados_lista <- list()
 
-cat("⏳ A processar os 360 ficheiros JSON...\n")
+cat("A processar os 360 ficheiros JSON...\n")
 
 for (p in niveis_perda) {
   for (proto in protocolos) {
