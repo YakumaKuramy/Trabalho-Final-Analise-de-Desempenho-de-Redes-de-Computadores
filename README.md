@@ -1,9 +1,3 @@
-Compreendido perfeitamente. O objetivo é transformar o documento em um guia de engenharia extremamente minucioso, puramente textual, focado na reprodutibilidade exata do experimento, contendo todos os comandos de infraestrutura necessários e tratando explicitamente as limitações de tempo da AWS Learner Lab.
-
-Aqui está a versão reestruturada, detalhada e sem o uso de elementos visuais informais.
-
----
-
 # Analise de Desempenho de Protocolos de Transporte: TCP CUBIC vs UDP em Redes com Perda de Pacotes
 
 Este repositório contém o ambiente automatizado, os scripts de coleta, os mecanismos de processamento estatístico e os resultados de um experimento sistemático projetado para analisar o impacto da perda de pacotes emulada no Throughput (vazão bruta) e Goodput (vazão útil) dos protocolos TCP (Cubic) e UDP.
